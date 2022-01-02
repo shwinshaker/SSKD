@@ -1,8 +1,9 @@
 import os
 import os.path as osp
-import argparse
 import time
 import numpy as np
+import argparse
+import json
 
 import torch
 import torch.nn as nn
@@ -12,7 +13,9 @@ from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 
 import torchvision.transforms as transforms
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
+from helper.logger import Logger
+from helper.util import get_lr, Dict2Obj
 
 from utils import AverageMeter, accuracy
 from wrapper import wrapper
@@ -20,57 +23,33 @@ from cifar import CIFAR100
 
 from models import model_dict
 
+
+# get config file
+parser = argparse.ArgumentParser('config file')
+parser.add_argument('--config_file', '-c', type=str, help='config file')
+config = parser.parse_args()
+print('Config file: ', config.config_file)
+
+# load config
+args = {}
+with open(config.config_file, 'rt') as f:
+    args.update(json.load(f))
+args = Dict2Obj(args)
+print('   Save folder: ', args.exp_path)
+print()
+
+
+
+print('==> Set enviroment..')
 torch.backends.cudnn.benchmark = True
-
-parser = argparse.ArgumentParser(description='train SSKD student network.')
-parser.add_argument('--epoch', type=int, default=240)
-parser.add_argument('--t-epoch', type=int, default=60)
-parser.add_argument('--batch-size', type=int, default=64)
-
-parser.add_argument('--lr', type=float, default=0.05)
-parser.add_argument('--t-lr', type=float, default=0.05)
-parser.add_argument('--momentum', type=float, default=0.9)
-parser.add_argument('--weight-decay', type=float, default=5e-4)
-parser.add_argument('--gamma', type=float, default=0.1)
-parser.add_argument('--milestones', type=int, nargs='+', default=[150,180,210])
-parser.add_argument('--t-milestones', type=int, nargs='+', default=[30,45])
-
-parser.add_argument('--save-interval', type=int, default=40)
-parser.add_argument('--ce-weight', type=float, default=0.1) # cross-entropy
-parser.add_argument('--kd-weight', type=float, default=0.9) # knowledge distillation
-parser.add_argument('--tf-weight', type=float, default=2.7) # transformation
-parser.add_argument('--ss-weight', type=float, default=10.0) # self-supervision
-
-parser.add_argument('--kd-T', type=float, default=4.0) # temperature in KD
-parser.add_argument('--tf-T', type=float, default=4.0) # temperature in LT
-parser.add_argument('--ss-T', type=float, default=0.5) # temperature in SS
-
-parser.add_argument('--ratio-tf', type=float, default=1.0) # keep how many wrong predictions of LT
-parser.add_argument('--ratio-ss', type=float, default=0.75) # keep how many wrong predictions of SS
-parser.add_argument('--s-arch', type=str) # student architecture
-parser.add_argument('--t-path', type=str) # teacher checkpoint path
-
-parser.add_argument('--seed', type=int, default=0)
-parser.add_argument('--gpu-id', type=int, default=0)
-
-args = parser.parse_args()
 torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 np.random.seed(args.seed)
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
 
-t_name = osp.abspath(args.t_path).split('/')[-1]
-t_arch = '_'.join(t_name.split('_')[1:-1])
-exp_name = 'sskd_student_{}_weight{}+{}+{}+{}_T{}+{}+{}_ratio{}+{}_seed{}_{}'.format(\
-            args.s_arch, \
-            args.ce_weight, args.kd_weight, args.tf_weight, args.ss_weight, \
-            args.kd_T, args.tf_T, args.ss_T, \
-            args.ratio_tf, args.ratio_ss, \
-            args.seed, t_name)
-exp_path = './experiments/{}'.format(exp_name)
-os.makedirs(exp_path, exist_ok=True)
-
+time_start = time.time()
+print('==> Load data..')
 transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
     transforms.ToTensor(),
@@ -87,9 +66,10 @@ valset = CIFAR100('./data', train=False, transform=transform_test)
 train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=False)
 val_loader = DataLoader(valset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=False)
 
+print('==> Load teacher model..')
 ckpt_path = osp.join(args.t_path, 'ckpt/best.pth')
-t_model = model_dict[t_arch](num_classes=100).cuda()
-state_dict = torch.load(ckpt_path)['state_dict']
+t_model = model_dict[args.t_arch](num_classes=100).cuda()
+state_dict = torch.load(ckpt_path)['model']
 t_model.load_state_dict(state_dict)
 t_model = wrapper(module=t_model).cuda()
 
@@ -99,8 +79,9 @@ t_optimizer = optim.SGD([{'params':t_model.backbone.parameters(), 'lr':0.0},
 t_model.eval()
 t_scheduler = MultiStepLR(t_optimizer, milestones=args.t_milestones, gamma=args.gamma)
 
-logger = SummaryWriter(osp.join(exp_path, 'events'))
+# logger = SummaryWriter(osp.join(exp_path, 'events'))
 
+print('==> Evaluate teacher model..')
 acc_record = AverageMeter()
 loss_record = AverageMeter()
 start = time.time()
@@ -120,6 +101,12 @@ run_time = time.time() - start
 info = 'teacher cls_acc:{:.2f}\n'.format(acc_record.avg)
 print(info)
 
+
+print('==> Train SSP head..')
+logger = Logger(osp.join(args.exp_path, 'log_ssp.txt'), title='log')
+logger.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
+                  'Train-Loss', 'Train-Acc', 'Test-Loss', 'Test-Acc'])
+
 # train ssp_head
 for epoch in range(args.t_epoch):
 
@@ -127,6 +114,7 @@ for epoch in range(args.t_epoch):
     loss_record = AverageMeter()
     acc_record = AverageMeter()
 
+    # --- training
     start = time.time()
     for x, _ in train_loader:
 
@@ -156,14 +144,17 @@ for epoch in range(args.t_epoch):
         loss_record.update(loss.item(), 3*batch)
         acc_record.update(batch_acc.item(), 3*batch)
 
-    logger.add_scalar('train/teacher_ssp_loss', loss_record.avg, epoch+1)
-    logger.add_scalar('train/teacher_ssp_acc', acc_record.avg, epoch+1)
+    # logger.add_scalar('train/teacher_ssp_loss', loss_record.avg, epoch+1)
+    # logger.add_scalar('train/teacher_ssp_acc', acc_record.avg, epoch+1)
+    logs = [epoch+1, get_lr(t_optimizer), (time.time() - time_start)/60]
+    logs += [loss_record.avg, acc_record.avg]
 
     run_time = time.time() - start
     info = 'teacher_train_Epoch:{:03d}/{:03d}\t run_time:{:.3f}\t ssp_loss:{:.3f}\t ssp_acc:{:.2f}\t'.format(
         epoch+1, args.t_epoch, run_time, loss_record.avg, acc_record.avg)
     print(info)
 
+    # --- evaluation
     t_model.eval()
     acc_record = AverageMeter()
     loss_record = AverageMeter()
@@ -193,25 +184,39 @@ for epoch in range(args.t_epoch):
         loss_record.update(loss.item(), 3*batch)
 
     run_time = time.time() - start
-    logger.add_scalar('val/teacher_ssp_loss', loss_record.avg, epoch+1)
-    logger.add_scalar('val/teacher_ssp_acc', acc_record.avg, epoch+1)
+    # logger.add_scalar('val/teacher_ssp_loss', loss_record.avg, epoch+1)
+    # logger.add_scalar('val/teacher_ssp_acc', acc_record.avg, epoch+1)
+    logs += [loss_record.avg, acc_record.avg]
+    logger.append(logs)
 
     info = 'ssp_test_Epoch:{:03d}/{:03d}\t run_time:{:.2f}\t ssp_loss:{:.3f}\t ssp_acc:{:.2f}\n'.format(
             epoch+1, args.t_epoch, run_time, loss_record.avg, acc_record.avg)
     print(info)
 
+
     t_scheduler.step()
 
+logger.close()
 
-name = osp.join(exp_path, 'ckpt/teacher.pth')
+print('==> Save pretrained teacher..')
+name = osp.join(args.exp_path, 'ckpt/teacher.pth')
 os.makedirs(osp.dirname(name), exist_ok=True)
 torch.save(t_model.state_dict(), name)
+print('  path: %s' % name)
 
 
+print('==> Initialize student model..')
 s_model = model_dict[args.s_arch](num_classes=100)
 s_model = wrapper(module=s_model).cuda()
 optimizer = optim.SGD(s_model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
+
+print('==> Train student model..')
+logger = Logger(osp.join(args.exp_path, 'log.txt'), title='log')
+logger.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
+                  'Train-Loss-CE', 'Train-Loss-KD', 'Train-Loss-TF', 'Train-Loss-SS',
+                  'Train-Acc', 'Train-Acc-SS',
+                  'Test-Loss', 'Test-Acc'])
 
 best_acc = 0
 for epoch in range(args.epoch):
@@ -306,12 +311,19 @@ for epoch in range(args.epoch):
         cls_acc_record.update(cls_batch_acc.item(), batch)
         ssp_acc_record.update(ssp_batch_acc.item(), 3*batch)
 
-    logger.add_scalar('train/ce_loss', loss1_record.avg, epoch+1)
-    logger.add_scalar('train/kd_loss', loss2_record.avg, epoch+1)
-    logger.add_scalar('train/tf_loss', loss3_record.avg, epoch+1)
-    logger.add_scalar('train/ss_loss', loss4_record.avg, epoch+1)
-    logger.add_scalar('train/cls_acc', cls_acc_record.avg, epoch+1)
-    logger.add_scalar('train/ss_acc', ssp_acc_record.avg, epoch+1)
+    # logger.add_scalar('train/ce_loss', loss1_record.avg, epoch+1)
+    # logger.add_scalar('train/kd_loss', loss2_record.avg, epoch+1)
+    # logger.add_scalar('train/tf_loss', loss3_record.avg, epoch+1)
+    # logger.add_scalar('train/ss_loss', loss4_record.avg, epoch+1)
+    # logger.add_scalar('train/cls_acc', cls_acc_record.avg, epoch+1)
+    # logger.add_scalar('train/ss_acc', ssp_acc_record.avg, epoch+1)
+    logs = [epoch+1, get_lr(optimizer), (time.time() - time_start)/60]
+    logs += [loss1_record.avg,
+             loss2_record.avg,
+             loss3_record.avg,
+             loss4_record.avg,
+             cls_acc_record.avg,
+             ssp_acc_record.avg]
 
     run_time = time.time() - start
     info = 'student_train_Epoch:{:03d}/{:03d}\t run_time:{:.3f}\t ce_loss:{:.3f}\t kd_loss:{:.3f}\t cls_acc:{:.2f}'.format(
@@ -336,8 +348,10 @@ for epoch in range(args.epoch):
         loss_record.update(loss.item(), x.size(0))
 
     run_time = time.time() - start
-    logger.add_scalar('val/ce_loss', loss_record.avg, epoch+1)
-    logger.add_scalar('val/cls_acc', acc_record.avg, epoch+1)
+    # logger.add_scalar('val/ce_loss', loss_record.avg, epoch+1)
+    # logger.add_scalar('val/cls_acc', acc_record.avg, epoch+1)
+    logs += [loss_record.avg, acc_record.avg]
+    logger.append(logs)
 
     info = 'student_test_Epoch:{:03d}/{:03d}\t run_time:{:.2f}\t cls_acc:{:.2f}\n'.format(
             epoch+1, args.epoch, run_time, acc_record.avg)
@@ -346,9 +360,12 @@ for epoch in range(args.epoch):
     if acc_record.avg > best_acc:
         best_acc = acc_record.avg
         state_dict = dict(epoch=epoch+1, state_dict=s_model.state_dict(), best_acc=best_acc)
-        name = osp.join(exp_path, 'ckpt/student_best.pth')
+        name = osp.join(args.exp_path, 'ckpt/student_best.pth')
         os.makedirs(osp.dirname(name), exist_ok=True)
         torch.save(state_dict, name)
     
     scheduler.step()
 
+
+logger.close()
+print('==> Done..')
