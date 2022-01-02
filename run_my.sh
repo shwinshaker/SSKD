@@ -1,23 +1,22 @@
 #!/bin/bash
 
 # -- Setting --
-gpu=7
-ce_weight=0.1
-kd_weight=0.9
+gpu=3
+ce_weight=1.0
+kd_weight=1.0
 tf_weight=2.7
 ss_weight=10.0
 
 teacher='wrn_40_2'
 # teacher='resnet32x4'
-student='wrn_40_1'
+student='wrn_16_2'
+# student='wrn_40_1'
 # student='ShuffleV2' 
 # student='resnet8x4' 
 
-# method='cifar100_lr_0.05_decay_0.0005'
-# method='cifar100_lr_0.05_decay_0.0005_swa=150'
-# method='cifar100_lr_0.05_decay_0.0005_curl_alpha=1_linear_swa=150'
-# method='cifar100_lr_0.05_decay_0.0005_swareg_alpha=1_linear'
-# method='cifar100_lr_0.05_decay_0.0005_swareg_alpha=1_linear_swa=150'
+# method='vanilla'
+# method='swa'
+# method='curl+swa'
 method='swar+swa'
 trial=0
 
