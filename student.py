@@ -39,7 +39,6 @@ print('   Save folder: ', args.exp_path)
 print()
 
 
-
 print('==> Set enviroment..')
 torch.backends.cudnn.benchmark = True
 torch.manual_seed(args.seed)
@@ -47,6 +46,17 @@ torch.cuda.manual_seed(args.seed)
 np.random.seed(args.seed)
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
+print('==> Initialize logger..')
+# init all at the very beginning so the links can be copied
+logger_ssp = Logger(osp.join(args.exp_path, 'log_ssp.txt'), title='log')
+logger_ssp.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
+                      'Train-Loss', 'Train-Acc', 'Test-Loss', 'Test-Acc'])
+
+logger = Logger(osp.join(args.exp_path, 'log.txt'), title='log')
+logger.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
+                  'Train-Loss-CE', 'Train-Loss-KD', 'Train-Loss-TF', 'Train-Loss-SS',
+                  'Train-Acc', 'Train-Acc-SS',
+                  'Test-Loss', 'Test-Acc'])
 
 time_start = time.time()
 print('==> Load data..')
@@ -102,11 +112,8 @@ info = 'teacher cls_acc:{:.2f}\n'.format(acc_record.avg)
 print(info)
 
 
-print('==> Train SSP head..')
-logger = Logger(osp.join(args.exp_path, 'log_ssp.txt'), title='log')
-logger.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
-                  'Train-Loss', 'Train-Acc', 'Test-Loss', 'Test-Acc'])
 
+print('==> Train SSP head..')
 # train ssp_head
 for epoch in range(args.t_epoch):
 
@@ -187,7 +194,7 @@ for epoch in range(args.t_epoch):
     # logger.add_scalar('val/teacher_ssp_loss', loss_record.avg, epoch+1)
     # logger.add_scalar('val/teacher_ssp_acc', acc_record.avg, epoch+1)
     logs += [loss_record.avg, acc_record.avg]
-    logger.append(logs)
+    logger_ssp.append(logs)
 
     info = 'ssp_test_Epoch:{:03d}/{:03d}\t run_time:{:.2f}\t ssp_loss:{:.3f}\t ssp_acc:{:.2f}\n'.format(
             epoch+1, args.t_epoch, run_time, loss_record.avg, acc_record.avg)
@@ -196,7 +203,7 @@ for epoch in range(args.t_epoch):
 
     t_scheduler.step()
 
-logger.close()
+logger_ssp.close()
 
 print('==> Save pretrained teacher..')
 name = osp.join(args.exp_path, 'ckpt/teacher.pth')
@@ -212,11 +219,6 @@ optimizer = optim.SGD(s_model.parameters(), lr=args.lr, momentum=args.momentum, 
 scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
 
 print('==> Train student model..')
-logger = Logger(osp.join(args.exp_path, 'log.txt'), title='log')
-logger.set_names(['Epoch', 'lr', 'Time-elapse(Min)',
-                  'Train-Loss-CE', 'Train-Loss-KD', 'Train-Loss-TF', 'Train-Loss-SS',
-                  'Train-Acc', 'Train-Acc-SS',
-                  'Test-Loss', 'Test-Acc'])
 
 best_acc = 0
 for epoch in range(args.epoch):
